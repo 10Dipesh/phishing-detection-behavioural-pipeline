@@ -1,0 +1,6 @@
+phishing-behaviour-env/
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+.ipynb_checkpoints/
