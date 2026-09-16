@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 RANDOM_SEED = 42
-N_USERS = 2000 #number of simulated user to generate
+N_USERS = 2500 #number of simulated user to generate
 
 #Generating hidden susceptibility profile scores
 def generate_profile_scores(n_users: int)-> np.ndarray:
@@ -52,7 +52,7 @@ def generate_hover_time(profile_scores:np.ndarray) -> np.ndarray:
     sigma = 0.6
 
     hover_times = np.random.lognormal(mean=mu, sigma=sigma)
-    return np.clip(times, 1, 120) #clip to plausible 1-120 second range
+    return np.clip(hover_times, 1, 120) #clip to plausible 1-120 second range
 
 # Feature 3: Number of link hovers before deciding 
 def generate_hover_count(profile_scores: np.ndarray)->np.ndarray:
@@ -108,7 +108,7 @@ def generate_reopen_count(profile_scores: np.ndarray)->np.ndarray:
     the first read.
     """
     lambda_reopen = 0.1 * 1.2 + (1-profile_scores)
-    return np.random.poision(lam=lambda_reopen)
+    return np.random.poisson(lam=lambda_reopen)
 
 #Feature 7: Sender address check - Binary(checked/ didn't checked)
 def generate_sender_check(profile_scores: np.ndarry)-> np.ndarray:
@@ -135,7 +135,7 @@ def generate_click_label(profile_scores: np.ndarray)->np.ndarray:
     rather than a trivial lookup table.
     """
     click_probability= profile_scores #profile scores IS the Click probability
-    return np.random.bionomial(n=1, p=click_probability)
+    return np.random.binomial(n=1, p=click_probability)
 
 #Feature 8: Time to report (only meaningful for non clickers)
 def generate_time_to_report(profile_scores: np.ndarray, click_label:np.ndarray)->np.ndarray:
@@ -165,6 +165,82 @@ def generate_time_to_report(profile_scores: np.ndarray, click_label:np.ndarray)-
     #only non-clickers have a report time; clickers get N/A
     report_times=np.where(click_label==0, report_times, np.nan)
     return report_times
+
+
+#Assemble everything into datafarame
+def assemble_dataset(user_ids, profile_scores, time_to_click,hover_time,
+                      hover_count, mouse_speed, slow_ratio, reopen_count,
+                      sender_check, click_label, time_to_report) -> pd.DataFrame:
+    """
+    Combines every generated array into one table - one row per user,
+    one column per feature. This is the shape both the cleaning
+    pipeline and the MLP training step expect.
+ 
+    Note the last column, `_profile_score_debug_only`: this is the
+    HIDDEN ground-truth score everything else was derived from. We
+    keep it in the file for our own validation (e.g. checking the
+    cleaning pipeline doesn't accidentally distort the underlying
+    signal) but it must NEVER be fed into the model as a feature -
+    that would be leaking the answer directly. The underscore-prefix
+    naming is a convention flagging 'not a real feature, debug only'.
+    """
+    return pd.DataFrame({
+        "user_id":user_ids,
+        "time_to_first_click_sec":time_to_click,
+        "hover_time_sec": hover_time,
+        "hover_count": hover_count,
+        "mean_mouse_speed_px_s": mouse_speed,
+        "slow_movement_ratio": slow_ratio,
+        "reopen_count": reopen_count,
+        "sender_checked": sender_check,
+        "time_to_report_sec": time_to_report,
+        "clicked_link": click_label,
+        "_profile_score_debug_only": profile_scores,
+    })
+#inject relastic noise and missingness
+def inject_noise_and_missingness(df:pd.DataFrame, missing_rate:float=0.05, outlier_rate:float=0.02, duplicate_rate:float=0.01)-> pd.DataFrame:
+    """
+    Corrupts a clean dataset in three realistic, DISTINCT ways, each
+    needing a different fix in the cleaning pipeline:
+ 
+    1. MISSING VALUES: simulates a tracking script failing to log a
+       particular signal for some sessions. Fixed by imputation or by
+       explicitly flagging as missing (relevant to RQ2's missing-
+       modality testing later).
+ 
+    2. OUTLIERS: simulates something like a browser tab left open
+       overnight, inflating a timer to an implausible value. Fixed by
+       detection + capping/removal, not imputation.
+ 
+    3. DUPLICATE ROWS: simulates a logging bug double-recording the
+       same session. Fixed by deduplication, not by touching any
+       individual value.
+       """
+    df = df.copy()
+    rng = np.random.default_rng(RANDOM_SEED+1)
+    n=len(df)
+    #missing value- applied to every real feature column
+    feature_cols=[
+        "time_to_first_click_sec","hover_time_sec","hover_count","mean_mouse_speed_px_s","slow_movement_ratio","reopen_count","sender_checked",
+    ]
+    for col in feature_cols:
+        missing_mask=rng.random(n)<missing_rate
+        df.loc[missing_mask, col]=np.nan
+
+    # Outliers - only makes sense for continuous, unbounded-ish features
+    continuous_cols = ["time_to_first_click_sec", "hover_time_sec", "mean_mouse_speed_px_s"]
+    for col in continuous_cols:
+        outlier_mask = rng.random(n) < outlier_rate
+        n_outliers = outlier_mask.sum()
+        if n_outliers > 0:
+            df.loc[outlier_mask, col] = df[col].max() * rng.uniform(3, 6, size=n_outliers)
+ 
+    # 3. Duplicate rows - randomly pick some existing rows and append copies
+    n_dupes = int(n * duplicate_rate)
+    dupe_rows = df.sample(n=n_dupes, random_state=RANDOM_SEED)
+    df = pd.concat([df, dupe_rows], ignore_index=True)
+ 
+    return df
 
 if __name__=="__main__":
     profile_scores = generate_profile_scores(N_USERS)
@@ -222,4 +298,23 @@ if __name__=="__main__":
     n_reported = (~np.isnan(time_to_report)).sum()
     print(f"  Non-clickers with a report time: {n_reported} out of {(click_label == 0).sum()} non-clickers")
     print(f"  Mean report time among non-clickers: {np.nanmean(time_to_report):.1f}s")
+ 
+    #Assemble , corrupt and save
+    user_ids = [f"user_{i:05d}" for i in range(N_USERS)]
+    clean_df=assemble_dataset(
+        user_ids, profile_scores, time_to_click, hover_time, hover_count, mouse_speed, slow_ratio, reopen_count, sender_check,click_label,time_to_report
+    )
+    dirty_df=inject_noise_and_missingness(clean_df)
+    print()
+    print("=" * 50)
+    print("Final dataset summary:")
+    print(f"  Clean rows generated: {len(clean_df)}")
+    print(f"  Rows after duplicate injection: {len(dirty_df)}")
+    print(f"  Missing values per column:")
+    print(dirty_df.isna().sum().to_string())
+ 
+    output_path = "data/behavioural_dataset_raw.csv"
+    dirty_df.to_csv(output_path, index=False)
+    print()
+    print(f"Saved to {output_path}")
  
