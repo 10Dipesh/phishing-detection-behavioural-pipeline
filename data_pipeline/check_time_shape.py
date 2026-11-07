@@ -30,6 +30,7 @@ for row, (col, label) in enumerate(COLUMNS.items()):
     for campaign in ["sim1", "sim2"]:
         values = df.loc[df["campaign"] == campaign, col].dropna()
         values = values[values > 0]  # log needs positive values
+        # Skewness is computed on all values; only the raw plot is trimmed.
         print(f"{label:32s} {campaign:8s} {len(values):5d} "
               f"{skew(values):9.2f} {skew(np.log(values)):9.2f}")
 
@@ -37,7 +38,7 @@ for row, (col, label) in enumerate(COLUMNS.items()):
         axes[row, 0].hist(values[values <= cap] / 60, bins=40, alpha=0.5, label=campaign)
         axes[row, 1].hist(np.log10(values), bins=40, alpha=0.5, label=campaign)
 
-    axes[row, 0].set_title(f"{label}: raw minutes (99th percentile cap)")
+    axes[row, 0].set_title(f"{label}: raw minutes (top 1% not shown)")
     axes[row, 1].set_title(f"{label}: log10(seconds)")
     axes[row, 0].set_xlabel("Minutes")
     axes[row, 1].set_xlabel("log10(seconds)")
